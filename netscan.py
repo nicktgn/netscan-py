@@ -83,7 +83,7 @@ def ping_broadcast(broadcast_ip):
 def nmap(subnet, exclude_list):
    hosts = {"no_mac": {}}
 
-   out = subprocess.check_output(CMD_NMAP1.format(exclude(exclude_list), subnet).split()).decode("utf-8")
+   out = subprocess.check_output(CMD_NMAP1.format(exclude(exclude_list), subnet).split()).decode("utf-8",  errors='replace')
    
    if DEBUG:
       print(out)
@@ -122,7 +122,7 @@ def arp_host(ip):
 def arp_table():
    hosts = []
 
-   out = subprocess.check_output(CMD_ARP_TABLE.split()).decode("utf-8")
+   out = subprocess.check_output(CMD_ARP_TABLE.split()).decode("utf-8", errors='replace')
    
    if DEBUG:
       print(out)

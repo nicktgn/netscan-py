@@ -4,9 +4,6 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-netaddr = "*"
-ifcfg = "*"
-netifaces = "*"
 pyyaml = "*"
 
 [dev-packages]
