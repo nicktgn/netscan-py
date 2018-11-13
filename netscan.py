@@ -22,6 +22,9 @@ CMD_NMAP1 = "nmap {} {}"
 CMD_ARP_HOST = "arp {}"
 CMD_ARP_TABLE = "arp -a"
 
+CMD_ARP_SCAN_WIN = "lib/arp-scan/arp-scan/Release(x64)/arp-scan.exe -t {}"
+
+
 MAC_EXCLUDE_LIST = ["FF:FF:FF:FF:FF:FF"]
 
 system = platform.system()
@@ -149,36 +152,72 @@ def arp_mac_format(mac):
    return ':'.join([part.upper() if len(part)==2 else '0{}'.format(part.upper()) for part in mac.split(orig_split)])
 
 
-def scan(subnet, exclude_list, no_nmap=False):
+def arp_scan(subnet):
+   hosts = []
+
+   out = ""
+
+   if system == 'Windows':
+      cmd = CMD_ARP_SCAN_WIN.format(subnet).split()
+      out = subprocess.check_output(cmd).decode("utf-8", errors='replace')
+      
+   if DEBUG:
+      print(out)
+
+   for line in out.splitlines():
+      if system == 'Windows':
+         m = re.match(r'^.* ([ABCDEF\d:]+) is ([\d\.]+).*$', line)
+
+      if m:
+         mac = arp_mac_format(m.group(1))
+         ip = m.group(1)
+         hosts.append({"mac": mac, "ip": ip})
+
+   return hosts
+
+
+def scan(subnet, exclude_list, no_arp_scan=False, no_nmap=False):
    new_hosts = {}
 
    network = ipaddress.ip_network(subnet)
-   broadcast_ip = network.broadcast_address
-   ping_broadcast(broadcast_ip)
 
-   if not no_nmap:
-      nmap_hosts = nmap(subnet, exclude_list)
-
-   # get arp tables
-   arp_hosts = arp_table()
-
-   exclude_list_split = exclude_list.split(',')
-   
-   for host in arp_hosts:
-      arp_mac = host['mac']
-      arp_ip = host['ip']
-      
-      if arp_ip in exclude_list_split \
-         or arp_mac in MAC_EXCLUDE_LIST \
-         or ipaddress.ip_address(arp_ip) not in network:
-         continue
+   # do ping + (nmap) + arp table
+   if no_arp_scan:
+      broadcast_ip = network.broadcast_address
+      ping_broadcast(broadcast_ip)
 
       if not no_nmap:
-         if mac in nmap_hosts:
-            new_hosts[arp_mac] = {**nmap_hosts[arp_mac], **host}
+         nmap_hosts = nmap(subnet, exclude_list)
+
+      # get arp tables
+      arp_hosts = arp_table()
+
+      exclude_list_split = exclude_list.split(',')
+   
+      for host in arp_hosts:
+         arp_mac = host['mac']
+         arp_ip = host['ip']
+         
+         if arp_ip in exclude_list_split \
+            or arp_mac in MAC_EXCLUDE_LIST \
+            or ipaddress.ip_address(arp_ip) not in network:
+            continue
+
+         if not no_nmap:
+            if mac in nmap_hosts:
+               new_hosts[arp_mac] = {**nmap_hosts[arp_mac], **host}
+            else:
+               new_hosts[arp_mac] = {**nmap_hosts['no_mac'][arp_ip], **host}
          else:
-            new_hosts[arp_mac] = {**nmap_hosts['no_mac'][arp_ip], **host}
-      else:
+            new_hosts[arp_mac] = {**host, 'os': None}
+
+   else:
+      arp_scan_hosts = arp_scan(subnet)
+
+      for host in arp_scan_hosts:
+         arp_mac = host['mac']
+         arp_ip = host['ip']
+
          new_hosts[arp_mac] = {**host, 'os': None}
 
    return new_hosts
@@ -202,8 +241,8 @@ def analyze_hosts(state, hosts):
    for s_host_mac, s_host in state['hosts'].items():
       new_state[s_host_mac] = s_host
 
-      # host is down
-      if s_host_mac not in hosts:
+      # host was online, but now host is down
+      if s_host['online'] and s_host_mac not in hosts:
          online_since = s_host['time_change']
          s_host['online'] = False
          s_host['time_change'] = time.time()
@@ -216,8 +255,8 @@ def analyze_hosts(state, hosts):
                since=time.strftime("%a %b %d %H:%M:%S", time.localtime(online_since)),
                duration=str(duration)))
 
-      # host is up, but was offline
-      elif not s_host['online']:
+      # host was offline, but now is up
+      elif not s_host['online'] and s_host_mac in hosts:
          offline_since = s_host['time_change']
          s_host['online'] = True
          s_host['ip'] = hosts[s_host_mac]['ip']    # update IP if host is back online
@@ -262,6 +301,7 @@ def main():
    subnet = args[0]   
    exclude = options.get("exclude", "")
    no_nmap = options.get("no-nmap", False)
+   no_arp_scan = options.get("no-arp-scan", False)
 
    logger = get_logger()
 
@@ -269,7 +309,10 @@ def main():
 
    while True:
       try: 
-         scanned_hosts = scan(subnet, exclude, no_nmap)
+         scanned_hosts = scan(subnet, exclude, 
+            no_nmap=no_nmap, 
+            no_arp_scan=no_arp_scan)
+         
          changes = analyze_hosts(state, scanned_hosts)
 
          for change in changes:
