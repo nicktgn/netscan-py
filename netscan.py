@@ -27,6 +27,8 @@ CMD_ARP_SCAN_WIN = "lib/arp-scan/arp-scan/Release(x64)/arp-scan.exe -t {}"
 
 MAC_EXCLUDE_LIST = ["FF:FF:FF:FF:FF:FF"]
 
+OFFLINE_COUNT_THRESHOLD = 3
+
 system = platform.system()
 
 
@@ -240,7 +242,9 @@ def analyze_hosts(state, hosts):
          new_state[host_mac] = {**host,
             'name': host_mac,
             'online': True,
-            'time_change': time.time()
+            'change_at': time.time(),
+            'offline_count': 0,
+            'offline_at': 0
          }
          changes.append("NEW host {} ({} | {}) is online".format(host_mac, host['ip'], host['os']))
 
@@ -248,34 +252,55 @@ def analyze_hosts(state, hosts):
    for s_host_mac, s_host in state['hosts'].items():
       new_state[s_host_mac] = s_host
 
-      # host was online, but now host is down
+      # ONLINE -> OFFLINE
       if s_host['online'] and s_host_mac not in hosts:
-         online_since = s_host['time_change']
-         s_host['online'] = False
-         s_host['time_change'] = time.time()
-         duration = datetime.timedelta(seconds=s_host['time_change'] - online_since)
+         # remember when went offline
+         if s_host['offline_count'] == 0:
+            s_host['offline_at'] = time.time()
 
-         changes.append("Host {name} ({ip} | {os}) is offline. Was online since {since} (duration: {duration})".format(
-               name=s_host['name'], 
-               ip=s_host['ip'], 
-               os=s_host['os'] if 'os' in s_host else None,
-               since=time.strftime("%a %b %d %H:%M:%S", time.localtime(online_since)),
-               duration=str(duration)))
+         # inlcrease offline counter
+         if s_host['offline_count'] < OFFLINE_COUNT_THRESHOLD:
+            s_host['offline_count'] += 1
 
-      # host was offline, but now is up
+         else:
+            online_since = s_host['change_at']
+            online_until = s_host['offline_at']
+            s_host['offline_count'] = 0
+            s_host['offline_at'] = 0
+            s_host['online'] = False
+            s_host['change_at'] = online_until
+            duration = datetime.timedelta(seconds=online_until - online_since)
+
+            changes.append("Host {name} ({ip} | {os}) went OFFLINE on {until}. Was online since {since} (duration: {duration})".format(
+                  name=s_host['name'], 
+                  ip=s_host['ip'], 
+                  os=s_host['os'] if 'os' in s_host else None,
+                  until=time.strftime("%a %b %d %H:%M:%S", time.localtime(online_until)),
+                  since=time.strftime("%a %b %d %H:%M:%S", time.localtime(online_since)),
+                  duration=str(duration)))
+
+      # RESET OFFLINE COUNTER
+      elif s_host['online'] and s_host_mac in hosts and s_host['offline_count'] > 0:
+         s_host['offline_count'] = 0
+         s_host['offline_at'] = 0
+
+      # OFFLINE -> ONLINE
       elif not s_host['online'] and s_host_mac in hosts:
-         offline_since = s_host['time_change']
+         offline_since = s_host['change_at']
+         offline_until = time.time()
+
          s_host['online'] = True
          s_host['ip'] = hosts[s_host_mac]['ip']    # update IP if host is back online
          if 'os' in hosts[s_host_mac] and hosts[s_host_mac]['os']:
             s_host['os'] = hosts[s_host_mac]['os'] # update OS if exists
-         s_host['time_change'] = time.time()
-         duration = datetime.timedelta(seconds=s_host['time_change'] - offline_since)
+         s_host['change_at'] = offline_until
+         duration = datetime.timedelta(seconds=offline_until - offline_since)
 
-         changes.append("Host {name} ({ip} | {os}) is online. Was offline since {since} (duration: {duration})".format(
+         changes.append("Host {name} ({ip} | {os}) went ONLINE on {until}. Was offline since {since} (duration: {duration})".format(
             name=s_host['name'], 
             ip=s_host['ip'], 
             os=s_host['os'] if 'os' in s_host else None,
+            until=time.strftime("%a %b %d %H:%M:%S", time.localtime(offline_until)),
             since=time.strftime("%a %b %d %H:%M:%S", time.localtime(offline_since)),
             duration=str(duration)))
 
@@ -326,6 +351,9 @@ def main():
             logger.info(change)
 
          write_state(state)
+
+         time.sleep(30)
+
       except (KeyboardInterrupt, SystemExit):
          print("Saving state and exiting...")
          write_state(state)
