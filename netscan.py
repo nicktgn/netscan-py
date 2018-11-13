@@ -170,7 +170,7 @@ def arp_scan(subnet):
 
       if m:
          mac = arp_mac_format(m.group(1))
-         ip = m.group(1)
+         ip = m.group(2)
          hosts.append({"mac": mac, "ip": ip})
 
    return hosts
@@ -181,9 +181,13 @@ def scan(subnet, exclude_list, no_arp_scan=False, no_nmap=False):
 
    network = ipaddress.ip_network(subnet)
 
+   exclude_list_split = set(exclude_list.split(','))
+   broadcast_ip = str(network.broadcast_address)
+   exclude_list_split.add(broadcast_ip)
+
+
    # do ping + (nmap) + arp table
    if no_arp_scan:
-      broadcast_ip = network.broadcast_address
       ping_broadcast(broadcast_ip)
 
       if not no_nmap:
@@ -192,8 +196,6 @@ def scan(subnet, exclude_list, no_arp_scan=False, no_nmap=False):
       # get arp tables
       arp_hosts = arp_table()
 
-      exclude_list_split = exclude_list.split(',')
-   
       for host in arp_hosts:
          arp_mac = host['mac']
          arp_ip = host['ip']
@@ -217,6 +219,11 @@ def scan(subnet, exclude_list, no_arp_scan=False, no_nmap=False):
       for host in arp_scan_hosts:
          arp_mac = host['mac']
          arp_ip = host['ip']
+
+         if arp_ip in exclude_list_split \
+            or arp_mac in MAC_EXCLUDE_LIST \
+            or ipaddress.ip_address(arp_ip) not in network:
+            continue
 
          new_hosts[arp_mac] = {**host, 'os': None}
 
