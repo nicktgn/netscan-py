@@ -33,6 +33,11 @@ OFFLINE_COUNT_THRESHOLD = 3
 
 system = platform.system()
 
+TIMEOUT_FAST = 10    # 10 sec
+TIMEOUT_NMAP = 240   # 4 min
+
+STEPS = ['nmap', 'arp-scan', 'arp']
+
 
 def get_logger():
    logger = logging.getLogger('netscan')
@@ -81,22 +86,27 @@ def ping_broadcast(broadcast_ip):
          out = subprocess.call(
             CMD_PING1.format(broadcast_ip).split(),
             stdout=devnull if not DEBUG else None,
-            timeout=10)
+            timeout=TIMEOUT_FAST)
       except subprocess.TimeoutExpired:
          pass
    return out == 0
 
 
 def nmap_net(subnet, exclude_list):
-   hosts = {"no_mac": {}}
+   hosts = []
+   no_macs = []
+   out = ""
 
    cmd = CMD_NMAP_QUICK_PLUS.format(
       exclude = exclude(exclude_list),
       target = subnet
       ).split()
 
-   out = subprocess.check_output(cmd).decode("utf-8",  errors='replace')
-   
+   try:
+      out = subprocess.check_output(cmd, timeout=TIMEOUT_NMAP).decode("utf-8",  errors='replace')
+   except subprocess.TimeoutExpired:
+      return hosts, no_macs, "nmap timeout"   
+
    if DEBUG:
       print(out)
 
@@ -116,25 +126,34 @@ def nmap_net(subnet, exclude_list):
       if ip:
          host = {"ip": ip, "os": os, "mac": mac}
          if mac:
-            hosts[mac] = host
+            hosts.append(host)
          else:
-            hosts["no_mac"][ip] = host
+            no_macs.append(host)
          ip = None
          mac = None
          os = None
 
-   return hosts
+   return hosts, no_macs, None
+
 
 def arp_host(ip):
-   out = subprocess.call(CMD_ARP_HOST.format(ip).split())
+   out = -1
+   try:
+      out = subprocess.call(CMD_ARP_HOST.format(ip).split(), timeout=TIMEOUT_FAST)
+   except subprocess.TimeoutExpired:
+      pass
 
    return out == 0
 
 
 def arp_table():
    hosts = []
+   out = ""
 
-   out = subprocess.check_output(CMD_ARP_TABLE.split()).decode("utf-8", errors='replace')
+   try:
+      out = subprocess.check_output(CMD_ARP_TABLE.split(), timeout=TIMEOUT_FAST).decode("utf-8", errors='replace')
+   except subprocess.TimeoutExpired:
+      return hosts, "arp timeout"
    
    if DEBUG:
       print(out)
@@ -150,7 +169,7 @@ def arp_table():
          mac = arp_mac_format(m.group(2))
          hosts.append({"mac": mac, "ip": ip})
 
-   return hosts
+   return hosts, None
 
 
 def arp_mac_format(mac):
@@ -168,8 +187,11 @@ def arp_scan(subnet):
 
    if system == 'Windows':
       cmd = CMD_ARP_SCAN_WIN.format(subnet).split()
-      out = subprocess.check_output(cmd).decode("utf-8", errors='replace')
-      
+      try:
+         out = subprocess.check_output(cmd, timeout=TIMEOUT_FAST).decode("utf-8", errors='replace')
+      except subprocess.TimeoutExpired:
+         return hosts, "arp-scan timeout"
+
    if DEBUG:
       print(out)
 
@@ -182,15 +204,15 @@ def arp_scan(subnet):
          ip = m.group(2)
          hosts.append({"mac": mac, "ip": ip})
 
-   return hosts
+   return hosts, None
 
 
 def host_filtered(host_mac, host_ip, exclude_list, network):
    if host_ip in exclude_list \
       or host_mac in MAC_EXCLUDE_LIST \
       or ipaddress.ip_address(host_ip) not in network:
-         return false
-   return true
+         return True
+   return False
 
 
 def update_hosts(hosts, host):
@@ -203,8 +225,9 @@ def update_hosts(hosts, host):
    pass
 
 
-def scan(subnet, exclude, do_arp_scan=False, do_nmap=False, do_arp=False):
-   new_hosts = {}
+def scan(subnet, exclude, logger, do_arp_scan=False, do_nmap=False, do_arp=False):
+   updates = {}
+   errors = 0
 
    network = ipaddress.ip_network(subnet)
 
@@ -215,43 +238,31 @@ def scan(subnet, exclude, do_arp_scan=False, do_nmap=False, do_arp=False):
    # 1) ping broadcast 
    ping_broadcast(broadcast_ip)
 
-   # 2) 
-   if do_nmap:
-      nmap_hosts = nmap_net(subnet, exclude)
+   for step in STEPS:
+      if step == 'nmap' and do_nmap:
+         hosts, no_macs, error = nmap_net(subnet, exclude)
+      elif step == 'arp-scan' and do_arp_scan:
+         hosts, error = arp_scan(subnet)
+      elif step == 'arp' and do_arp:
+         hosts, error = arp_table()
+      else:
+         continue
 
-      for host_mac, host in nmap_hosts.items():
-         if host_filtered(host_mac, host['ip'], exclude_list, network):
+      if error is not None:
+         logger.error(error)
+         error += 1
+         continue
+
+      for host in hosts:
+         if host_filtered(host['mac'], host['ip'], exclude_list, network):
             continue
 
-         update_hosts(new_hosts, host)
-           
-   # 3)
-   if do_arp_scan:
-      arp_scan_hosts = arp_scan(subnet)
+         update_hosts(updates, host)
 
-      for host in arp_scan_hosts:
-         arp_mac = host['mac']
-         arp_ip = host['ip']
+   if len(updates) == 0 and errors > 0:
+      return None
 
-         if host_filtered(arp_mac, arp_ip, exclude_list, network):
-            continue
-
-         update_hosts(new_hosts, host)
-
-   # 4)
-   if do_arp:
-      arp_hosts = arp_table()
-
-      for host in arp_hosts:
-         arp_mac = host['mac']
-         arp_ip = host['ip']
-         
-         if host_filtered(arp_mac, arp_ip, exclude_list, network):
-            continue
-
-         update_hosts(new_hosts, host)
-
-   return new_hosts
+   return updates
 
 
 def analyze_hosts(state, hosts):
@@ -366,11 +377,15 @@ def main():
       try: 
          print("Update timestamp: {}".format(time.strftime("%a %b %d %H:%M:%S", time.localtime(time.time()))))
 
-         scanned_hosts = scan(subnet, exclude, 
+         scanned_hosts = scan(subnet, exclude, logger,
             do_nmap=do_nmap, 
             do_arp_scan=do_arp_scan,
             do_arp=do_arp)
          
+         # some errors occured and there were no updates
+         if scanned_hosts == None:
+            continue
+
          changes = analyze_hosts(state, scanned_hosts)
 
          for change in changes:
