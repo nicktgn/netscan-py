@@ -19,6 +19,8 @@ STATE_FILE = "data/netscan_state.yml"
 
 CMD_PING1 = "ping {}"
 CMD_NMAP1 = "nmap {} {}"
+CMD_NMAP_QUICK = "nmap -T4 -F {exclude} {target}"
+CMD_NMAP_QUICK_PLUS = "nmap -sV -T4 -O -F --version-light {exclude} {target}"
 CMD_ARP_HOST = "arp {}"
 CMD_ARP_TABLE = "arp -a"
 
@@ -85,10 +87,15 @@ def ping_broadcast(broadcast_ip):
    return out == 0
 
 
-def nmap(subnet, exclude_list):
+def nmap_net(subnet, exclude_list):
    hosts = {"no_mac": {}}
 
-   out = subprocess.check_output(CMD_NMAP1.format(exclude(exclude_list), subnet).split()).decode("utf-8",  errors='replace')
+   cmd = CMD_NMAP_QUICK_PLUS.format(
+      exclude = exclude(exclude_list),
+      target = subnet
+      ).split()
+
+   out = subprocess.check_output(cmd).decode("utf-8",  errors='replace')
    
    if DEBUG:
       print(out)
@@ -178,56 +185,71 @@ def arp_scan(subnet):
    return hosts
 
 
-def scan(subnet, exclude_list, no_arp_scan=False, no_nmap=False):
+def host_filtered(host_mac, host_ip, exclude_list, network):
+   if host_ip in exclude_list \
+      or host_mac in MAC_EXCLUDE_LIST \
+      or ipaddress.ip_address(host_ip) not in network:
+         return false
+   return true
+
+
+def update_hosts(hosts, host):
+   if host['mac'] not in hosts:
+      hosts[host['mac']] = host
+   else:
+      for key in host:
+         if host[key]:
+            hosts[host['mac']][key] = host[key]
+   pass
+
+
+def scan(subnet, exclude, do_arp_scan=False, do_nmap=False, do_arp=False):
    new_hosts = {}
 
    network = ipaddress.ip_network(subnet)
 
-   exclude_list_split = set(exclude_list.split(','))
+   exclude_list = set(exclude.split(','))
    broadcast_ip = str(network.broadcast_address)
-   exclude_list_split.add(broadcast_ip)
+   exclude_list.add(broadcast_ip)
 
+   # 1) ping broadcast 
+   ping_broadcast(broadcast_ip)
 
-   # do ping + (nmap) + arp table
-   if no_arp_scan:
-      ping_broadcast(broadcast_ip)
+   # 2) 
+   if do_nmap:
+      nmap_hosts = nmap_net(subnet, exclude)
 
-      if not no_nmap:
-         nmap_hosts = nmap(subnet, exclude_list)
-
-      # get arp tables
-      arp_hosts = arp_table()
-
-      for host in arp_hosts:
-         arp_mac = host['mac']
-         arp_ip = host['ip']
-         
-         if arp_ip in exclude_list_split \
-            or arp_mac in MAC_EXCLUDE_LIST \
-            or ipaddress.ip_address(arp_ip) not in network:
+      for host_mac, host in nmap_hosts.items():
+         if host_filtered(host_mac, host['ip'], exclude_list, network):
             continue
 
-         if not no_nmap:
-            if mac in nmap_hosts:
-               new_hosts[arp_mac] = {**nmap_hosts[arp_mac], **host}
-            else:
-               new_hosts[arp_mac] = {**nmap_hosts['no_mac'][arp_ip], **host}
-         else:
-            new_hosts[arp_mac] = {**host, 'os': None}
-
-   else:
+         update_hosts(new_hosts, host)
+           
+   # 3)
+   if do_arp_scan:
       arp_scan_hosts = arp_scan(subnet)
 
       for host in arp_scan_hosts:
          arp_mac = host['mac']
          arp_ip = host['ip']
 
-         if arp_ip in exclude_list_split \
-            or arp_mac in MAC_EXCLUDE_LIST \
-            or ipaddress.ip_address(arp_ip) not in network:
+         if host_filtered(arp_mac, arp_ip, exclude_list, network):
             continue
 
-         new_hosts[arp_mac] = {**host, 'os': None}
+         update_hosts(new_hosts, host)
+
+   # 4)
+   if do_arp:
+      arp_hosts = arp_table()
+
+      for host in arp_hosts:
+         arp_mac = host['mac']
+         arp_ip = host['ip']
+         
+         if host_filtered(arp_mac, arp_ip, exclude_list, network):
+            continue
+
+         update_hosts(new_hosts, host)
 
    return new_hosts
 
@@ -332,8 +354,9 @@ def main():
 
    subnet = args[0]   
    exclude = options.get("exclude", "")
-   no_nmap = options.get("no-nmap", False)
-   no_arp_scan = options.get("no-arp-scan", False)
+   do_nmap = options.get("nmap", False)
+   do_arp_scan = options.get("arp-scan", False)
+   do_arp = options.get("arp", False)
 
    logger = get_logger()
 
@@ -341,9 +364,12 @@ def main():
 
    while True:
       try: 
+         print("Update timestamp: {}".format(time.strftime("%a %b %d %H:%M:%S", time.localtime(time.time()))))
+
          scanned_hosts = scan(subnet, exclude, 
-            no_nmap=no_nmap, 
-            no_arp_scan=no_arp_scan)
+            do_nmap=do_nmap, 
+            do_arp_scan=do_arp_scan,
+            do_arp=do_arp)
          
          changes = analyze_hosts(state, scanned_hosts)
 
@@ -352,7 +378,7 @@ def main():
 
          write_state(state)
 
-         time.sleep(30)
+         time.sleep(10)
 
       except (KeyboardInterrupt, SystemExit):
          print("Saving state and exiting...")
