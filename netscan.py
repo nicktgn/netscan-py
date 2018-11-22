@@ -207,9 +207,9 @@ def arp_scan(subnet):
    return hosts, None
 
 
-def host_filtered(host_mac, host_ip, exclude_list, network):
+def host_filtered(host_mac, host_ip, exclude_list, mac_exclude_list, network):
    if host_ip in exclude_list \
-      or host_mac in MAC_EXCLUDE_LIST \
+      or host_mac in mac_exclude_list \
       or ipaddress.ip_address(host_ip) not in network:
          return True
    return False
@@ -225,7 +225,7 @@ def update_hosts(hosts, host):
    pass
 
 
-def scan(subnet, exclude, logger, do_arp_scan=False, do_nmap=False, do_arp=False):
+def scan(subnet, exclude, exclude_mac, logger, do_arp_scan=False, do_nmap=False, do_arp=False):
    updates = {}
    errors = 0
 
@@ -234,6 +234,9 @@ def scan(subnet, exclude, logger, do_arp_scan=False, do_nmap=False, do_arp=False
    exclude_list = set(exclude.split(','))
    broadcast_ip = str(network.broadcast_address)
    exclude_list.add(broadcast_ip)
+
+   mac_exclude_list = set(exclude_mac.split(','))
+   mac_exclude_list.update(MAC_EXCLUDE_LIST)
 
    # 1) ping broadcast 
    ping_broadcast(broadcast_ip)
@@ -254,7 +257,7 @@ def scan(subnet, exclude, logger, do_arp_scan=False, do_nmap=False, do_arp=False
          continue
 
       for host in hosts:
-         if host_filtered(host['mac'], host['ip'], exclude_list, network):
+         if host_filtered(host['mac'], host['ip'], exclude_list, mac_exclude_list, network):
             continue
 
          update_hosts(updates, host)
@@ -365,6 +368,7 @@ def main():
 
    subnet = args[0]   
    exclude = options.get("exclude", "")
+   exclude_mac = options.get("exclude-mac", "")
    do_nmap = options.get("nmap", False)
    do_arp_scan = options.get("arp-scan", False)
    do_arp = options.get("arp", False)
@@ -377,7 +381,7 @@ def main():
       try: 
          print("Update timestamp: {}".format(time.strftime("%a %b %d %H:%M:%S", time.localtime(time.time()))))
 
-         scanned_hosts = scan(subnet, exclude, logger,
+         scanned_hosts = scan(subnet, exclude, exclude_mac, logger,
             do_nmap=do_nmap, 
             do_arp_scan=do_arp_scan,
             do_arp=do_arp)
@@ -395,10 +399,16 @@ def main():
 
          time.sleep(10)
 
-      except (KeyboardInterrupt, SystemExit):
-         print("Saving state and exiting...")
+      except KeyboardInterrupt:
+         logger.info("Saving state and exiting...")
          write_state(state)
          sys.exit(0)
+
+      except Exception as e:
+         logger.exception(e)
+         raise
+    
+   raise
 
    pass
 
