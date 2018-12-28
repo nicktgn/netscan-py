@@ -253,7 +253,7 @@ def scan(subnet, exclude, exclude_mac, logger, do_arp_scan=False, do_nmap=False,
 
       if error is not None:
          logger.error(error)
-         error += 1
+         errors += 1
          continue
 
       for host in hosts:
